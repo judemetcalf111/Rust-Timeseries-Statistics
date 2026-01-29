@@ -5,7 +5,5 @@ edition = "2024"
 
 [dependencies]
 csv = "1.4.0"
-hdf5 = "0.8.1"
-num-complex = "0.4.6"
 rustfft = "6.4.1"
-serde = "1.0.228"
+thiserror = "2.0.18"
