@@ -3,6 +3,7 @@ use std::fs::{File,create_dir_all};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::env;
+use std::thread::park_timeout_ms;
 use rustfft::{FftPlanner, num_complex::Complex};
 use csv::Writer;
 use itertools::izip;
@@ -102,27 +103,32 @@ fn process_full_signal(path: &Path) -> Result<(), Box<dyn Error>> {
 
     if let Err(e) = create_dir_all(&fft_path) {
     eprintln!(
-        "Error creating directory 'fft_data' inside {}: {}",
-        path.display(),e);
+        "Error creating directory 'fft_data' inside {:?}: {}",
+        path,e);
     }
 
-    save_fft_results(&fft_path, &signal2, sample_rate, "_fftx")?;
-    save_fft_results(&fft_path, &signal3, sample_rate, "_ffty")?;  
-    save_full_fft_results(&fft_path, &signal2, &signal3, sample_rate, "_full_fft")?;
+    save_fft_results(&fft_path, &signal2, sample_rate, "_square_fftx")?;
+    save_fft_results(&fft_path, &signal3, sample_rate, "_square_ffty")?;  
+    save_full_fft_results(&fft_path, &signal2, &signal3, sample_rate, "_full_PSD")?;
 
-    println!("Processed {} ({} samples) at {:.2} Hz", path.display(), n, sample_rate);
+    println!("Processed {:?} ({} samples) at {:.2} Hz", path, n, sample_rate);
     Ok(())
 }
 
-fn calculate_acf(data: &[f64], max_lag: usize) -> Vec<f64> {
+fn calculate_acf(original_path: &Path, data: &[f64], max_lag: usize, timestep: f64, file_ending: &'static str) -> Result<(), Box<dyn Error>>{
+    let mut new_path = PathBuf::from(original_path);
+    let stem = original_path.file_stem().unwrap().to_str().unwrap();
+    new_path.set_file_name(format!("{}{}.csv", stem, file_ending));
+
+    let mut wtr = Writer::from_path(&new_path)?;
+    wtr.write_record(&["Time", "ACF"])?;
+
     let n: f64 = data.len() as f64;
     let mean: f64 = data.iter().sum::<f64>() / n;
     
     // Pre-calculate variance and centered data
     let centered_data: Vec<f64> = data.iter().map(|&x| x - mean).collect();
     let variance = centered_data.iter().map(|&x| x * x).sum::<f64>() / n;
-
-    let mut acf = Vec::with_capacity(max_lag + 1);
 
     for k in 0..=max_lag {
         // Dot product of data_adj[0..n-k] and data_adj[k..n]
@@ -131,11 +137,16 @@ fn calculate_acf(data: &[f64], max_lag: usize) -> Vec<f64> {
             .zip(&centered_data[k..])
             .map(|(a, b)| a * b)
             .sum();
+
+        let acf_val: f64 = sum_product / (n * variance);
+        let time: f64 = k as f64 * timestep;
             
-        acf.push(sum_product / (n * variance));
+        wtr.write_record(&[time.to_string(),acf_val.to_string()])?;
     }
 
-    acf
+    wtr.flush()?;
+    println!("Results saved to: {:?}", new_path);
+    Ok(())
 }
 
 fn save_fft_results(original_path: &Path, data: &[Complex<f64>], sample_rate: f64, file_ending: &'static str) -> Result<(), Box<dyn Error>> {
@@ -149,8 +160,8 @@ fn save_fft_results(original_path: &Path, data: &[Complex<f64>], sample_rate: f6
 
     let n = data.len();
     for (i, complex) in data.iter().enumerate().take(n / 2) {
-        let freq = i as f64 * sample_rate / n as f64;
-        let magnitude = (complex.re.powi(2) + complex.im.powi(2)).sqrt();
+        let freq: f64 = i as f64 * sample_rate / n as f64;
+        let magnitude: f64 = (complex.re.powi(2) + complex.im.powi(2)).sqrt();
         wtr.write_record(&[freq.to_string(), magnitude.to_string()])?;
     }
 
@@ -169,7 +180,7 @@ fn save_full_fft_results(original_path: &Path, datax: &[Complex<f64>], datay: &[
     wtr.write_record(&["Frequency", "Magnitude"])?;
 
     let n = datax.len();
-    for (i, complexx, complexy) in izip!(datax, datay).enumerate().take(n / 2) {
+    for (i, (&complexx, &complexy)) in izip!(datax, datay).enumerate().take(n / 2) {
         let freq = i as f64 * sample_rate / n as f64;
         let magnitude = (complexx.re.powi(2) + complexx.im.powi(2) +
                          complexy.re.powi(2) + complexy.im.powi(2)).sqrt();
