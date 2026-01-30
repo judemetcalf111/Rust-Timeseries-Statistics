@@ -3,7 +3,6 @@ use std::fs::{File,create_dir_all};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::env;
-use std::thread::park_timeout_ms;
 use rustfft::{FftPlanner, num_complex::Complex};
 use csv::Writer;
 use itertools::izip;
@@ -66,6 +65,17 @@ fn detect_file_type(path: &Path) -> Result<FileType, Box<dyn Error>> {
 
 fn process_full_signal(path: &Path) -> Result<(), Box<dyn Error>> {
     let mut rdr = csv::Reader::from_path(path)?;
+    let timeseries_path = path.parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(path.file_stem().unwrap_or_default())
+        .join("_timeseries_data");    
+    
+    if let Err(e) = create_dir_all(&timeseries_path) {
+        eprintln!(
+            "Error creating directory '_timeseries_data' inside {:?}: {}",
+            path,e);
+    }
+
     
     let mut signal2: Vec<Complex<f64>> = Vec::new();
     let mut signal3: Vec<Complex<f64>> = Vec::new();
@@ -83,7 +93,6 @@ fn process_full_signal(path: &Path) -> Result<(), Box<dyn Error>> {
         signal3.push(Complex { re: s3, im: 0.0 });
     }
 
-    // calculate_acf
 
     let n = signal2.len();
     if n < 2 { return Err("Not enough data".into()); }
@@ -92,30 +101,27 @@ fn process_full_signal(path: &Path) -> Result<(), Box<dyn Error>> {
     let total_time = timestamps.last().unwrap() - timestamps.first().unwrap();
     let sample_rate = (n as f64 - 1.0) / total_time;
 
+    // calculate ACF and save
+    calculate_and_save_acf(&timeseries_path,&signal2,10000,1. / sample_rate, "_ACF_x")?;
+    calculate_and_save_acf(&timeseries_path,&signal3,10000,1. / sample_rate, "_ACF_y")?;
+
+    // Begin FFT work
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(n);
 
     fft.process(&mut signal2);
     fft.process(&mut signal3);
 
-    // Save to CSV
-    let fft_path = Path::new(path).join("timeseries_data");
-
-    if let Err(e) = create_dir_all(&fft_path) {
-    eprintln!(
-        "Error creating directory 'fft_data' inside {:?}: {}",
-        path,e);
-    }
-
-    save_fft_results(&fft_path, &signal2, sample_rate, "_square_fftx")?;
-    save_fft_results(&fft_path, &signal3, sample_rate, "_square_ffty")?;  
-    save_full_fft_results(&fft_path, &signal2, &signal3, sample_rate, "_full_PSD")?;
+    // Save FFT magnitudes to CSV
+    save_fft_results(&timeseries_path, &signal2, sample_rate, "_square_fftx")?;
+    save_fft_results(&timeseries_path, &signal3, sample_rate, "_square_ffty")?;  
+    save_full_fft_results(&timeseries_path, &signal2, &signal3, sample_rate, "_full_PSD")?;
 
     println!("Processed {:?} ({} samples) at {:.2} Hz", path, n, sample_rate);
     Ok(())
 }
 
-fn calculate_acf(original_path: &Path, data: &[f64], max_lag: usize, timestep: f64, file_ending: &'static str) -> Result<(), Box<dyn Error>>{
+fn calculate_and_save_acf(original_path: &Path, complex_data: &Vec<Complex<f64>>, max_lag: usize, timestep: f64, file_ending: &'static str) -> Result<(), Box<dyn Error>>{
     let mut new_path = PathBuf::from(original_path);
     let stem = original_path.file_stem().unwrap().to_str().unwrap();
     new_path.set_file_name(format!("{}{}.csv", stem, file_ending));
@@ -123,16 +129,16 @@ fn calculate_acf(original_path: &Path, data: &[f64], max_lag: usize, timestep: f
     let mut wtr = Writer::from_path(&new_path)?;
     wtr.write_record(&["Time", "ACF"])?;
 
-    let n: f64 = data.len() as f64;
-    let mean: f64 = data.iter().sum::<f64>() / n;
+    let n: f64 = complex_data.len() as f64;
+    let mean: f64 = complex_data.iter().map(|&x| x.re).sum::<f64>() / n;
     
     // Pre-calculate variance and centered data
-    let centered_data: Vec<f64> = data.iter().map(|&x| x - mean).collect();
-    let variance = centered_data.iter().map(|&x| x * x).sum::<f64>() / n;
+    let centered_data: Vec<f64> = complex_data.iter().map(|&x| x.re - mean).collect();
+    let variance = centered_data.iter().map(|&x| x* x).sum::<f64>() / n;
 
     for k in 0..=max_lag {
         // Dot product of data_adj[0..n-k] and data_adj[k..n]
-        let sum_product: f64 = centered_data[..data.len() - k]
+        let sum_product: f64 = centered_data[..complex_data.len() - k]
             .iter()
             .zip(&centered_data[k..])
             .map(|(a, b)| a * b)
