@@ -1,10 +1,11 @@
 use std::error::Error;
-use std::fs::File;
-use std::io::{Read, Write};
+use std::fs::{File,create_dir_all};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::{env, io};
+use std::env;
 use rustfft::{FftPlanner, num_complex::Complex};
 use csv::Writer;
+use itertools::izip;
 
 #[derive(Debug, PartialEq)]
 enum FileType {
@@ -41,7 +42,8 @@ fn file_looper(file_vector: Vec<String>) -> Result<(), Box<dyn Error>> {
         match file_type {
             FileType::CSV => {
                 if let Err(e) = process_full_signal(path) {
-                    eprintln!("Error processing {}: {}", filename, e);
+                    println!("Error processing {}: {}", filename, e);
+                    continue;
                 }
             },
             FileType::Unknown => println!("Unknown file format: {}", filename),
@@ -80,6 +82,8 @@ fn process_full_signal(path: &Path) -> Result<(), Box<dyn Error>> {
         signal3.push(Complex { re: s3, im: 0.0 });
     }
 
+    // calculate_acf
+
     let n = signal2.len();
     if n < 2 { return Err("Not enough data".into()); }
 
@@ -94,17 +98,51 @@ fn process_full_signal(path: &Path) -> Result<(), Box<dyn Error>> {
     fft.process(&mut signal3);
 
     // Save to CSV
-    save_fft_results(path, &signal2, sample_rate)?;
+    let fft_path = Path::new(path).join("timeseries_data");
+
+    if let Err(e) = create_dir_all(&fft_path) {
+    eprintln!(
+        "Error creating directory 'fft_data' inside {}: {}",
+        path.display(),e);
+    }
+
+    save_fft_results(&fft_path, &signal2, sample_rate, "_fftx")?;
+    save_fft_results(&fft_path, &signal3, sample_rate, "_ffty")?;  
+    save_full_fft_results(&fft_path, &signal2, &signal3, sample_rate, "_full_fft")?;
 
     println!("Processed {} ({} samples) at {:.2} Hz", path.display(), n, sample_rate);
     Ok(())
 }
 
-fn save_fft_results(original_path: &Path, data: &[Complex<f64>], sample_rate: f64) -> Result<(), Box<dyn Error>> {
+fn calculate_acf(data: &[f64], max_lag: usize) -> Vec<f64> {
+    let n: f64 = data.len() as f64;
+    let mean: f64 = data.iter().sum::<f64>() / n;
+    
+    // Pre-calculate variance and centered data
+    let centered_data: Vec<f64> = data.iter().map(|&x| x - mean).collect();
+    let variance = centered_data.iter().map(|&x| x * x).sum::<f64>() / n;
+
+    let mut acf = Vec::with_capacity(max_lag + 1);
+
+    for k in 0..=max_lag {
+        // Dot product of data_adj[0..n-k] and data_adj[k..n]
+        let sum_product: f64 = centered_data[..data.len() - k]
+            .iter()
+            .zip(&centered_data[k..])
+            .map(|(a, b)| a * b)
+            .sum();
+            
+        acf.push(sum_product / (n * variance));
+    }
+
+    acf
+}
+
+fn save_fft_results(original_path: &Path, data: &[Complex<f64>], sample_rate: f64, file_ending: &'static str) -> Result<(), Box<dyn Error>> {
     // Create new filename: "original_fft.csv"
     let mut new_path = PathBuf::from(original_path);
     let stem = original_path.file_stem().unwrap().to_str().unwrap();
-    new_path.set_file_name(format!("{}_fft.csv", stem));
+    new_path.set_file_name(format!("{}{}.csv", stem, file_ending));
 
     let mut wtr = Writer::from_path(&new_path)?;
     wtr.write_record(&["Frequency", "Magnitude"])?;
@@ -113,6 +151,28 @@ fn save_fft_results(original_path: &Path, data: &[Complex<f64>], sample_rate: f6
     for (i, complex) in data.iter().enumerate().take(n / 2) {
         let freq = i as f64 * sample_rate / n as f64;
         let magnitude = (complex.re.powi(2) + complex.im.powi(2)).sqrt();
+        wtr.write_record(&[freq.to_string(), magnitude.to_string()])?;
+    }
+
+    wtr.flush()?;
+    println!("Results saved to: {:?}", new_path);
+    Ok(())
+}
+
+fn save_full_fft_results(original_path: &Path, datax: &[Complex<f64>], datay: &[Complex<f64>], sample_rate: f64, file_ending: &'static str) -> Result<(), Box<dyn Error>> {
+    // Create new filename: "original_fft.csv"
+    let mut new_path = PathBuf::from(original_path);
+    let stem = original_path.file_stem().unwrap().to_str().unwrap();
+    new_path.set_file_name(format!("{}{}.csv", stem, file_ending));
+
+    let mut wtr = Writer::from_path(&new_path)?;
+    wtr.write_record(&["Frequency", "Magnitude"])?;
+
+    let n = datax.len();
+    for (i, complexx, complexy) in izip!(datax, datay).enumerate().take(n / 2) {
+        let freq = i as f64 * sample_rate / n as f64;
+        let magnitude = (complexx.re.powi(2) + complexx.im.powi(2) +
+                         complexy.re.powi(2) + complexy.im.powi(2)).sqrt();
         wtr.write_record(&[freq.to_string(), magnitude.to_string()])?;
     }
 
