@@ -1,11 +1,13 @@
 use std::error::Error;
-use std::fs::{File,create_dir_all};
+use std::fs::{File, create_dir_all};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::env;
+// use std::f64::consts::PI;
+
 use rustfft::{FftPlanner, num_complex::Complex};
 use csv::Writer;
-use itertools::izip;
+use ndarray::{Array1, s}; // ndarray imports
 
 #[derive(Debug, PartialEq)]
 enum FileType {
@@ -14,7 +16,6 @@ enum FileType {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Collect args, skipping the executable name
     let args: Vec<String> = env::args().skip(1).collect();
 
     if args.is_empty() {
@@ -31,22 +32,14 @@ fn file_looper(file_vector: Vec<String>) -> Result<(), Box<dyn Error>> {
     for filename in &file_vector {
         let path = Path::new(filename);
 
-        let file_type = match detect_file_type(path) {
-            Ok(file_type) => file_type,
-            Err(e) => {
-                eprintln!("Error detecting type for {}: {}", filename, e);
-                continue;
-            }
-        };
-
-        match file_type {
-            FileType::CSV => {
+        match detect_file_type(path) {
+            Ok(FileType::CSV) => {
                 if let Err(e) = process_full_signal(path) {
-                    println!("Error processing {}: {}", filename, e);
-                    continue;
+                    eprintln!("Error processing {}: {}", filename, e);
                 }
             },
-            FileType::Unknown => println!("Unknown file format: {}", filename),
+            Ok(FileType::Unknown) => println!("Unknown file format: {}", filename),
+            Err(e) => eprintln!("Error detecting type for {}: {}", filename, e),
         }
     }
     Ok(())
@@ -57,7 +50,7 @@ fn detect_file_type(path: &Path) -> Result<FileType, Box<dyn Error>> {
     let mut buffer = [0u8; 8];
     let n = file.read(&mut buffer)?;
 
-    if n > 0 && buffer[..n].iter().all(|&b| b.is_ascii() && !b.is_ascii_control()) {
+    if n > 0 && buffer[..n].iter().all(|&b| b.is_ascii() && (b == b'\n' || b == b'\r' || !b.is_ascii_control())) {
         return Ok(FileType::CSV);
     }
     Ok(FileType::Unknown)
@@ -65,20 +58,18 @@ fn detect_file_type(path: &Path) -> Result<FileType, Box<dyn Error>> {
 
 fn process_full_signal(path: &Path) -> Result<(), Box<dyn Error>> {
     let mut rdr = csv::Reader::from_path(path)?;
+    
+    // Create output directory safely
+    let stem = path.file_stem().unwrap_or_default().to_str().unwrap_or("data");
     let timeseries_path = path.parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join(path.file_stem().unwrap_or_default())
-        .join("_timeseries_data");    
-    
-    if let Err(e) = create_dir_all(&timeseries_path) {
-        eprintln!(
-            "Error creating directory '_timeseries_data' inside {:?}: {}",
-            path,e);
-    }
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{}_timeseries_data", stem));
+        
+    create_dir_all(&timeseries_path)?;
 
-    
-    let mut signal2: Vec<Complex<f64>> = Vec::new();
-    let mut signal3: Vec<Complex<f64>> = Vec::new();
+    // Temporary vectors to hold read data
+    let mut raw_s2: Vec<Complex<f64>> = Vec::new();
+    let mut raw_s3: Vec<Complex<f64>> = Vec::new();
     let mut timestamps: Vec<f64> = Vec::new();
 
     for result in rdr.records() {
@@ -89,111 +80,172 @@ fn process_full_signal(path: &Path) -> Result<(), Box<dyn Error>> {
         let s3: f64 = record.get(2).unwrap_or("0").parse()?;
 
         timestamps.push(t);
-        signal2.push(Complex { re: s2, im: 0.0 });
-        signal3.push(Complex { re: s3, im: 0.0 });
+        raw_s2.push(Complex { re: s2, im: 0.0 });
+        raw_s3.push(Complex { re: s3, im: 0.0 });
     }
 
-
-    let n = signal2.len();
+    let n = raw_s2.len();
     if n < 2 { return Err("Not enough data".into()); }
 
-    // Calculate Sample Rate: Fs = 1 / average delta T
+    // Convert to ndarray for easier math
+    let mut signal2 = Array1::from(raw_s2);
+    let mut signal3 = Array1::from(raw_s3);
+
+    // Calculate Sample Rate
     let total_time = timestamps.last().unwrap() - timestamps.first().unwrap();
     let sample_rate = (n as f64 - 1.0) / total_time;
+    let dt = 1.0 / sample_rate;
 
-    // calculate ACF and save
-    calculate_and_save_acf(&timeseries_path,&signal2,10000,1. / sample_rate, "_ACF_x")?;
-    calculate_and_save_acf(&timeseries_path,&signal3,10000,1. / sample_rate, "_ACF_y")?;
+    // Calculate ACF (before windowing or FFT)
+    // Takes every tenth length, 
+    // since the resolution will be more than good enough at that scale.
+    // Ensures speed!!!
+    calculate_and_save_acf(&timeseries_path, &signal2, 10, dt, "ACF_x")?;
+    calculate_and_save_acf(&timeseries_path, &signal3, 10, dt, "ACF_y")?;
 
-    // Begin FFT work
+    // // Apply Windowing (Hann) For the Future
+    // // We apply the window to the signal in-place to reduce spectral leakage
+    // apply_hann_window(&mut signal2);
+    // apply_hann_window(&mut signal3);
+
+    // FFT 
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(n);
 
-    fft.process(&mut signal2);
-    fft.process(&mut signal3);
+    // RustFFT requires a mutable slice. ndarray provides this via .as_slice_mut().
+    // If the array is not contiguous (it usually is here), this would return None, so we unwrap.
+    fft.process(signal2.as_slice_mut().unwrap());
+    fft.process(signal3.as_slice_mut().unwrap());
 
-    // Save FFT magnitudes to CSV
-    save_fft_results(&timeseries_path, &signal2, sample_rate, "_square_fftx")?;
-    save_fft_results(&timeseries_path, &signal3, sample_rate, "_square_ffty")?;  
-    save_full_fft_results(&timeseries_path, &signal2, &signal3, sample_rate, "_full_PSD")?;
+    // Save Results
+    save_fft_results(&timeseries_path, &signal2, sample_rate, "square_fftx")?;
+    save_fft_results(&timeseries_path, &signal3, sample_rate, "square_ffty")?;  
+    save_full_fft_results(&timeseries_path, &signal2, &signal3, sample_rate, "full_PSD")?;
 
     println!("Processed {:?} ({} samples) at {:.2} Hz", path, n, sample_rate);
     Ok(())
 }
 
-fn calculate_and_save_acf(original_path: &Path, complex_data: &Vec<Complex<f64>>, max_lag: usize, timestep: f64, file_ending: &'static str) -> Result<(), Box<dyn Error>>{
-    let mut new_path = PathBuf::from(original_path);
-    let stem = original_path.file_stem().unwrap().to_str().unwrap();
-    new_path.set_file_name(format!("{}{}.csv", stem, file_ending));
+// /// Applies a Hann window to the signal in-place using ndarray
+// fn apply_hann_window(signal: &mut Array1<Complex<f64>>) {
+//     let n = signal.len();
+//     let n_f = n as f64;
+    
+//     // Create the window array
+//     let window = Array1::from_shape_fn(n, |i| {
+//         0.5 * (1.0 - (2.0 * PI * i as f64 / (n_f - 1.0)).cos())
+//     });
 
-    let mut wtr = Writer::from_path(&new_path)?;
+//     // Element-wise multiplication
+//     // Zip the signal with the window and update signal.re (im is 0 anyway for real signals)
+//     for (val, &win_val) in signal.iter_mut().zip(window.iter()) {
+//         val.re *= win_val;
+//         val.im *= win_val; // If signal was complex, we'd scale both parts
+//     }
+// }
+
+fn calculate_and_save_acf(
+    dir: &Path, 
+    data: &Array1<Complex<f64>>, 
+    sample_size: u64, 
+    timestep: f64, 
+    suffix: &str
+) -> Result<(), Box<dyn Error>> {
+    let filename = format!("{}.csv", suffix);
+    let full_path = dir.join(filename);
+    
+    let mut wtr = Writer::from_path(&full_path)?;
     wtr.write_record(&["Time", "ACF"])?;
 
-    let n: f64 = complex_data.len() as f64;
-    let mean: f64 = complex_data.iter().map(|&x| x.re).sum::<f64>() / n;
+    let n = data.len();
+    let n_f = n as f64;
     
-    // Pre-calculate variance and centered data
-    let centered_data: Vec<f64> = complex_data.iter().map(|&x| x.re - mean).collect();
-    let variance = centered_data.iter().map(|&x| x* x).sum::<f64>() / n;
+    // Calculate mean using iterator
+    let sum_re: f64 = data.iter().map(|c| c.re).sum();
+    let mean = sum_re / n_f;
 
-    for k in 0..=max_lag {
-        // Dot product of data_adj[0..n-k] and data_adj[k..n]
-        let sum_product: f64 = centered_data[..complex_data.len() - k]
-            .iter()
-            .zip(&centered_data[k..])
-            .map(|(a, b)| a * b)
-            .sum();
+    // Center the data (remove mean)
+    let centered: Array1<f64> = data.map(|c| c.re - mean);
+    
+    // Calculate Variance
+    let variance = centered.fold(0.0, |acc, &x| acc + x * x) / n_f;
 
-        let acf_val: f64 = sum_product / (n * variance);
+    // Create max_iterations
+    let max_iterations: usize = ((n_f - 1.0) / sample_size as f64).floor() as usize;
+
+    for pre_k in 0..=max_iterations {
+
+        let k: usize = pre_k * sample_size as usize;
+        // Slice logic for ndarray: data[0..N-k] dot data[k..N]
+        let slice_a = centered.slice(s![..n-k]);
+        let slice_b = centered.slice(s![k..]);
+
+        let sum_product: f64 = slice_a.dot(&slice_b);
+
+        let acf_val: f64 = if variance.abs() > 1e-9 {
+            sum_product / (n_f * variance)
+        } else {
+            0.0
+        };
+        
         let time: f64 = k as f64 * timestep;
-            
-        wtr.write_record(&[time.to_string(),acf_val.to_string()])?;
+        wtr.write_record(&[time.to_string(), acf_val.to_string()])?;
     }
 
     wtr.flush()?;
-    println!("Results saved to: {:?}", new_path);
     Ok(())
 }
 
-fn save_fft_results(original_path: &Path, data: &[Complex<f64>], sample_rate: f64, file_ending: &'static str) -> Result<(), Box<dyn Error>> {
-    // Create new filename: "original_fft.csv"
-    let mut new_path = PathBuf::from(original_path);
-    let stem = original_path.file_stem().unwrap().to_str().unwrap();
-    new_path.set_file_name(format!("{}{}.csv", stem, file_ending));
+fn save_fft_results(
+    dir: &Path, 
+    data: &Array1<Complex<f64>>, 
+    sample_rate: f64, 
+    suffix: &str
+    ) -> Result<(), Box<dyn Error>> {
+    let filename: String = format!("{}.csv", suffix);
+    let full_path: std::path::PathBuf = dir.join(filename);
 
-    let mut wtr = Writer::from_path(&new_path)?;
+    let mut wtr: Writer<File> = Writer::from_path(&full_path)?;
     wtr.write_record(&["Frequency", "Magnitude"])?;
 
     let n = data.len();
-    for (i, complex) in data.iter().enumerate().take(n / 2) {
-        let freq: f64 = i as f64 * sample_rate / n as f64;
-        let magnitude: f64 = (complex.re.powi(2) + complex.im.powi(2)).sqrt();
+    // Only iterate up to Nyquist frequency (N/2)
+    for i in 0..n / 2 {
+        let freq = i as f64 * sample_rate / n as f64;
+        let magnitude = data[i].norm(); // .norm() is sqrt(re^2 + im^2)
         wtr.write_record(&[freq.to_string(), magnitude.to_string()])?;
     }
 
     wtr.flush()?;
-    println!("Results saved to: {:?}", new_path);
     Ok(())
 }
 
-fn save_full_fft_results(original_path: &Path, datax: &[Complex<f64>], datay: &[Complex<f64>], sample_rate: f64, file_ending: &'static str) -> Result<(), Box<dyn Error>> {
-    // Create new filename: "original_fft.csv"
-    let mut new_path = PathBuf::from(original_path);
-    let stem = original_path.file_stem().unwrap().to_str().unwrap();
-    new_path.set_file_name(format!("{}{}.csv", stem, file_ending));
+fn save_full_fft_results(
+    dir: &Path, 
+    datax: &Array1<Complex<f64>>, 
+    datay: &Array1<Complex<f64>>, 
+    sample_rate: f64, 
+    suffix: &str
+) -> Result<(), Box<dyn Error>> {
+    let filename: String = format!("{}.csv", suffix);
+    let full_path: std::path::PathBuf = dir.join(filename);
 
-    let mut wtr = Writer::from_path(&new_path)?;
-    wtr.write_record(&["Frequency", "Magnitude"])?;
+    let mut wtr: Writer<File> = Writer::from_path(&full_path)?;
+    wtr.write_record(&["Frequency", "Combined_Magnitude"])?;
 
-    let n = datax.len();
-    for (i, (&complexx, &complexy)) in izip!(datax, datay).enumerate().take(n / 2) {
-        let freq = i as f64 * sample_rate / n as f64;
-        let magnitude = (complexx.re.powi(2) + complexx.im.powi(2) +
-                         complexy.re.powi(2) + complexy.im.powi(2)).sqrt();
-        wtr.write_record(&[freq.to_string(), magnitude.to_string()])?;
+    let n: usize = datax.len();
+
+    // Calculating both the magnitudes along x and y, and summing the magnitude.
+    // Effectively a geometric mean, proper way to construct a PSD
+    for i in 0..n / 2 {
+        let freq: f64 = i as f64 * sample_rate / n as f64;
+        let mag_x_sq: f64 = datax[i].norm_sqr();
+        let mag_y_sq: f64 = datay[i].norm_sqr();
+        let combined: f64 = (mag_x_sq + mag_y_sq).sqrt();
+        
+        wtr.write_record(&[freq.to_string(), combined.to_string()])?;
     }
 
     wtr.flush()?;
-    println!("Results saved to: {:?}", new_path);
     Ok(())
 }
