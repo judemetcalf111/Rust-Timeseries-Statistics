@@ -224,39 +224,20 @@ fn save_fft_results(
     let filename: String = format!("{}.csv", suffix);
     let full_path: std::path::PathBuf = dir.join(filename);
 
-    let plot_name: String = format!("Plot_{}.pdf", suffix);
-    let plot_path: std::path::PathBuf = dir.join(plot_name);
-    let plot_string: &str = plot_path.to_str().expect("Path contained invalid Unicode characters");
-
     let mut wtr: Writer<File> = Writer::from_path(&full_path)?;
     wtr.write_record(&["Frequency", "Magnitude"])?;
 
     let max_interations: usize = data.len();
-
-    let mut plot_data: Vec<(f64, Vec<f64>)> = Vec::with_capacity(max_interations);
 
     let n = max_interations;
     // Only iterate up to Nyquist frequency (N/2)
     for i in 0..n / 2 {
         let freq = i as f64 * sample_rate / n as f64;
         let magnitude = data[i].norm(); // .norm() is sqrt(re^2 + im^2)
-
-        plot_data.push((freq.log10(), vec![magnitude.log10()]));
         wtr.write_record(&[freq.to_string(), magnitude.to_string()])?;
     }
     
     wtr.flush()?;
-
-    let _: complot::Plot = (
-        plot_data.into_iter(),
-        complot::complot!(
-            plot_string, 
-            xlabel = "Frequency (log10)", 
-            ylabel = "Squared FT Magnitude (log10)",
-            title = format!("Plotting: {}", suffix)
-        )
-    ).into();
-
     Ok(())
 }
 
@@ -271,16 +252,10 @@ fn save_full_fft_results(
     let filename: String = format!("{}.csv", suffix);
     let full_path: std::path::PathBuf = dir.join(filename);
 
-    let plot_name: String = format!("Plot_{}.pdf", suffix);
-    let plot_path: std::path::PathBuf = dir.join(plot_name);
-    let plot_string: &str = plot_path.to_str().expect("Path contained invalid Unicode characters");
-
     let mut wtr: Writer<File> = Writer::from_path(&full_path)?;
     wtr.write_record(&["Frequency", "Combined_Magnitude"])?;
 
     let max_interations: usize = datax.len();
-
-    let mut plot_data: Vec<(f64, Vec<f64>)> = Vec::with_capacity(max_interations);
 
     // Calculating both the magnitudes along x and y, and summing the magnitude.
     // Effectively a geometric mean, proper way to construct a PSD
@@ -290,21 +265,10 @@ fn save_full_fft_results(
         let mag_y_sq: f64 = datay[n].norm_sqr();
         let combined: f64 = (mag_x_sq + mag_y_sq).sqrt();
 
-        plot_data.push((freq.log10(), vec![combined.log10()]));
         wtr.write_record(&[freq.to_string(), combined.to_string()])?;
     }
 
     wtr.flush()?;
-
-    let _: complot::Plot = (
-        plot_data.into_iter(),
-        complot::complot!(
-            plot_string, 
-            xlabel = "Frequency (log10)", 
-            ylabel = "Squared 2D FT Magnitude (log10)",
-            title = format!("Plotting: {}", suffix)
-        )
-    ).into();
 
     Ok(())
 }
