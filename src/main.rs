@@ -151,8 +151,12 @@ fn calculate_and_save_acf(
     timestep: f64, 
     suffix: &str
 ) -> Result<(), Box<dyn Error>> {
-    let filename = format!("{}.csv", suffix);
-    let full_path = dir.join(filename);
+    let filename: String = format!("{}.csv", suffix);
+    let full_path: std::path::PathBuf = dir.join(filename);
+
+    let plot_name: String = format!("Plot_{}.pdf", suffix);
+    let plot_path: std::path::PathBuf = dir.join(plot_name);
+    let plot_string: &str = plot_path.to_str().expect("Path contained invalid Unicode characters");
     
     let mut wtr = Writer::from_path(&full_path)?;
     wtr.write_record(&["Time", "ACF"])?;
@@ -172,6 +176,7 @@ fn calculate_and_save_acf(
 
     // Create max_iterations
     let max_iterations: usize = ((n_f - 1.0) / sample_size as f64).floor() as usize;
+    let mut plot_data: Vec<(f64, Vec<f64>)> = Vec::with_capacity(max_iterations);
 
     for pre_k in 0..=max_iterations {
 
@@ -190,9 +195,22 @@ fn calculate_and_save_acf(
         
         let time: f64 = k as f64 * timestep;
         wtr.write_record(&[time.to_string(), acf_val.to_string()])?;
+
+        plot_data.push((time, vec![acf_val]));
     }
 
     wtr.flush()?;
+
+    let _: complot::Plot = (
+        plot_data.into_iter(),
+        complot::complot!(
+            plot_string, 
+            xlabel = "Time", 
+            ylabel = "ACF Function",
+            title = format!("Plotting: {}", suffix)
+        )
+    ).into();
+
     Ok(())
 }
 
@@ -202,21 +220,43 @@ fn save_fft_results(
     sample_rate: f64, 
     suffix: &str
     ) -> Result<(), Box<dyn Error>> {
+        
     let filename: String = format!("{}.csv", suffix);
     let full_path: std::path::PathBuf = dir.join(filename);
+
+    let plot_name: String = format!("Plot_{}.pdf", suffix);
+    let plot_path: std::path::PathBuf = dir.join(plot_name);
+    let plot_string: &str = plot_path.to_str().expect("Path contained invalid Unicode characters");
 
     let mut wtr: Writer<File> = Writer::from_path(&full_path)?;
     wtr.write_record(&["Frequency", "Magnitude"])?;
 
-    let n = data.len();
+    let max_interations: usize = data.len();
+
+    let mut plot_data: Vec<(f64, Vec<f64>)> = Vec::with_capacity(max_interations);
+
+    let n = max_interations;
     // Only iterate up to Nyquist frequency (N/2)
     for i in 0..n / 2 {
         let freq = i as f64 * sample_rate / n as f64;
         let magnitude = data[i].norm(); // .norm() is sqrt(re^2 + im^2)
+
+        plot_data.push((freq, vec![magnitude]));
         wtr.write_record(&[freq.to_string(), magnitude.to_string()])?;
     }
-
+    
     wtr.flush()?;
+
+    let _: complot::Plot = (
+        plot_data.into_iter(),
+        complot::complot!(
+            plot_string, 
+            xlabel = "Frequency", 
+            ylabel = "Squared FT Magnitude",
+            title = format!("Plotting: {}", suffix)
+        )
+    ).into();
+
     Ok(())
 }
 
@@ -226,26 +266,45 @@ fn save_full_fft_results(
     datay: &Array1<Complex<f64>>, 
     sample_rate: f64, 
     suffix: &str
-) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
+        
     let filename: String = format!("{}.csv", suffix);
     let full_path: std::path::PathBuf = dir.join(filename);
+
+    let plot_name: String = format!("Plot_{}.pdf", suffix);
+    let plot_path: std::path::PathBuf = dir.join(plot_name);
+    let plot_string: &str = plot_path.to_str().expect("Path contained invalid Unicode characters");
 
     let mut wtr: Writer<File> = Writer::from_path(&full_path)?;
     wtr.write_record(&["Frequency", "Combined_Magnitude"])?;
 
-    let n: usize = datax.len();
+    let max_interations: usize = datax.len();
+
+    let mut plot_data: Vec<(f64, Vec<f64>)> = Vec::with_capacity(max_interations);
 
     // Calculating both the magnitudes along x and y, and summing the magnitude.
     // Effectively a geometric mean, proper way to construct a PSD
-    for i in 0..n / 2 {
-        let freq: f64 = i as f64 * sample_rate / n as f64;
-        let mag_x_sq: f64 = datax[i].norm_sqr();
-        let mag_y_sq: f64 = datay[i].norm_sqr();
+    for n in 0..max_interations / 2 {
+        let freq: f64 = n as f64 * sample_rate / max_interations as f64;
+        let mag_x_sq: f64 = datax[n].norm_sqr();
+        let mag_y_sq: f64 = datay[n].norm_sqr();
         let combined: f64 = (mag_x_sq + mag_y_sq).sqrt();
-        
+
+        plot_data.push((freq, vec![combined]));
         wtr.write_record(&[freq.to_string(), combined.to_string()])?;
     }
 
     wtr.flush()?;
+
+    let _: complot::Plot = (
+        plot_data.into_iter(),
+        complot::complot!(
+            plot_string, 
+            xlabel = "Frequency", 
+            ylabel = "Squared 2D FT Magnitude",
+            title = format!("Plotting: {}", suffix)
+        )
+    ).into();
+
     Ok(())
 }

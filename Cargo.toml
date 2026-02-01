@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+complot = "0.3.5"
 csv = "1.4.0"
 itertools = "0.14.0"
 ndarray = "0.17.2"
