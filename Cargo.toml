@@ -1,7 +1,7 @@
 [package]
 name = "Rust-Timeseries-Statistics"
-version = "0.1.0"
-edition = "2026"
+version = "1.0.0"
+edition = "2024"
 
 [dependencies]
 complot = "0.3.5"
