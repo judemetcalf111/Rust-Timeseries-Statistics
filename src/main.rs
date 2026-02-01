@@ -205,7 +205,7 @@ fn calculate_and_save_acf(
         plot_data.into_iter(),
         complot::complot!(
             plot_string, 
-            xlabel = "Time", 
+            xlabel = "Lag", 
             ylabel = "ACF Function",
             title = format!("Plotting: {}", suffix)
         )
@@ -241,7 +241,7 @@ fn save_fft_results(
         let freq = i as f64 * sample_rate / n as f64;
         let magnitude = data[i].norm(); // .norm() is sqrt(re^2 + im^2)
 
-        plot_data.push((freq, vec![magnitude]));
+        plot_data.push((freq.log10(), vec![magnitude.log10()]));
         wtr.write_record(&[freq.to_string(), magnitude.to_string()])?;
     }
     
@@ -251,8 +251,8 @@ fn save_fft_results(
         plot_data.into_iter(),
         complot::complot!(
             plot_string, 
-            xlabel = "Frequency", 
-            ylabel = "Squared FT Magnitude",
+            xlabel = "Frequency (log10)", 
+            ylabel = "Squared FT Magnitude (log10)",
             title = format!("Plotting: {}", suffix)
         )
     ).into();
@@ -290,7 +290,7 @@ fn save_full_fft_results(
         let mag_y_sq: f64 = datay[n].norm_sqr();
         let combined: f64 = (mag_x_sq + mag_y_sq).sqrt();
 
-        plot_data.push((freq, vec![combined]));
+        plot_data.push((freq.log10(), vec![combined.log10()]));
         wtr.write_record(&[freq.to_string(), combined.to_string()])?;
     }
 
@@ -300,8 +300,8 @@ fn save_full_fft_results(
         plot_data.into_iter(),
         complot::complot!(
             plot_string, 
-            xlabel = "Frequency", 
-            ylabel = "Squared 2D FT Magnitude",
+            xlabel = "Frequency (log10)", 
+            ylabel = "Squared 2D FT Magnitude (log10)",
             title = format!("Plotting: {}", suffix)
         )
     ).into();
